@@ -3,6 +3,7 @@ import smtplib
 from utilis import send_email
 from sqlalchemy import func
 import os
+import traceback
 from dotenv import load_dotenv
 import jwt
 from flask_mail import Message as MailMessage,Mail
@@ -56,9 +57,9 @@ db.init_app(app)
 migrate = Migrate(app, db)
 
 
-# @app.route("/")
-# def home():
-#     return jsonify({"message": "Flask backend is live!"})
+@app.route("/")
+def home():
+    return jsonify({"message": "Flask backend is live!"})
 
 
 # Create Admin
@@ -585,15 +586,8 @@ def delete_workshop_item(id):
 @app.route("/api/orders/confirm/<int:order_id>", methods=["POST"])
 def confirm_order(order_id):
     try:
-        # Jaribu kupata online order kwanza
+        # Pata online order pekee
         order = db.session.get(Order, order_id)
-        source = "online"
-
-        if not order:
-            # Ikiwa online order haipo, jaribu manual order
-            order = db.session.get(ManualOrder, order_id)
-            source = "manual"
-
         if not order:
             return jsonify({"error": "Order not found"}), 404
 
@@ -603,24 +597,31 @@ def confirm_order(order_id):
         # Thibitisha malipo
         order.status = "paid"
 
-        # Punguza stock kulingana na source
-        order_items = []
+        # Punguza stock kulingana na source ya kila item
         try:
             order_items = json.loads(order.order_items or "[]")
         except Exception:
             return jsonify({"error": "Invalid order_items format"}), 400
 
+        print(f"Confirming Order #{order.id}, total items: {len(order_items)}")
+
         for item in order_items:
             product_name = item.get("product_name")
             quantity = int(item.get("quantity", 0))
+            item_source = item.get("source", "").lower()  # godown au workshop
 
-            if source == "online":
+            stock_item = None
+            if item_source == "godown":
                 stock_item = GodownItem.query.filter_by(product_name=product_name).first()
-            else:
+            elif item_source == "workshop":
                 stock_item = WorkshopItem.query.filter_by(product_name=product_name).first()
 
             if stock_item and stock_item.quantity is not None:
-                stock_item.quantity -= quantity
+                before_qty = stock_item.quantity
+                stock_item.quantity = max(stock_item.quantity - quantity, 0)
+                print(f"Reduced {quantity} of '{product_name}' from {item_source}. Stock: {before_qty} -> {stock_item.quantity}")
+            else:
+                print(f"Item '{product_name}' not found in {item_source} or quantity is None")
 
         # Tuma email kwa mteja
         try:
@@ -637,7 +638,7 @@ Asante kwa kununua kwetu!
 Timu ya Duka
 """
             send_email(
-                to=order.customer_address,  # Email ya mteja
+                to=order.customer_address,
                 subject=f"Uthibitisho wa Malipo ya Oda #{order.id}",
                 body=email_body,
             )
@@ -645,12 +646,14 @@ Timu ya Duka
             print("Email sending error:", str(e))
 
         db.session.commit()
-        return jsonify({"message": f"{source.capitalize()} order confirmed and email sent", "status": "paid"}), 200
+        print(f"Order #{order.id} confirmed successfully!")
+        return jsonify({"message": "Online order confirmed and email sent", "status": "paid"}), 200
 
     except Exception as e:
         db.session.rollback()
         print("Confirm order failed:", str(e))
         return jsonify({"error": str(e)}), 500
+
 
 
 # hapa ni kucreate order
@@ -747,7 +750,7 @@ def create_order():
 def get_orders():
     try:
         online_orders = Order.query.all()
-        manual_orders = ManualOrder.query.all()
+
 
         result = []
 
@@ -891,6 +894,23 @@ def upload_video():
         ),
         201,
     )
+
+
+@app.route("/api/videos/<int:video_id>", methods=["DELETE"])
+def delete_video(video_id):
+    try:
+        video = Video.query.get(video_id)
+        if not video:
+            return jsonify({"error": "Video haipo"}), 404
+
+        db.session.delete(video)
+        db.session.commit()
+
+        return jsonify({"message": "Video imefutwa kikamilifu"}), 200
+    except Exception as e:
+        print("Error deleting video:", str(e))
+        return jsonify({"error": "Imeshindikana kufuta video"}), 500
+
 
 
 # Serve uploaded video files
@@ -1237,31 +1257,51 @@ def get_posted_godown_items():
 @app.route("/api/manual-order", methods=["POST"])
 def create_manual_order():
     try:
-        data = request.json
-        print("📥 Data received:", data)
+        data = request.get_json()
+        print("Data received:", data)
+
+        # Sanitize fields if needed
+        customer_name = data.get("customer_name", "").strip()
+        phone = data.get("phone", "").strip()
+        email = data.get("email", "").strip()
+        location = data.get("location", "").strip()
+        items = data.get("items", [])
+        payment_method = data.get("payment_method", "cash").strip()
+        total_price = data.get("total_price", 0.0)
+        notes = data.get("notes", "").strip()
+        delivery_option = data.get("delivery_option", "").strip()
+        delivery_location = data.get("delivery_location", "").strip()
+
+        # Convert items to JSON string for storage
+        items_json = json.dumps(items, ensure_ascii=False)
 
         new_order = ManualOrder(
-            customer_name=data["customer_name"],
-            phone=data["phone"],
-            email=data.get("email", ""),
-            location=data.get("location", ""),
-            items=json.dumps(data["items"]),
-            payment_method=data.get("payment_method", "cash"),
-            total_price=data.get("total_price", 0.0),
-            notes=data.get("notes", ""),
+            customer_name=customer_name,
+            phone=phone,
+            email=email,
+            location=location,
+            items=items_json,
+            payment_method=payment_method,
+            total_price=total_price,
+            notes=notes,
             status="pending",
-            delivery_option=data.get("delivery_option", ""),
-            delivery_location=data.get("delivery_location", "")
+            delivery_option=delivery_option,
+            delivery_location=delivery_location
         )
 
         db.session.add(new_order)
         db.session.commit()
 
-        return jsonify({"message": "Manual order created successfully.", "order_id": new_order.id}), 201
+        return jsonify({
+            "message": "Manual order created successfully.",
+            "order_id": new_order.id
+        }), 201
 
-    except Exception as e:
-        print(f"Error creating manual order: {e}")
+    except Exception:
+        # Print full traceback to console
+        traceback.print_exc()
         return jsonify({"error": "Failed to create manual order"}), 500
+
 
 # --------------------------
 # GET Manual Orders
@@ -1299,7 +1339,7 @@ def get_manual_orders():
 
 
 # Route ya kuthibitisha malipo
-@app.route("/api/confirm-payment/<int:order_id>", methods=["POST"])
+@app.route("/api/manual-orders/<int:order_id>/confirm-payment", methods=["POST"])
 def confirm_payment(order_id):
     try:
         order = ManualOrder.query.get(order_id)
