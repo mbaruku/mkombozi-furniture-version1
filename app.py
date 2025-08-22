@@ -6,15 +6,20 @@ import os
 import traceback
 from dotenv import load_dotenv
 import jwt
+from threading import Thread
+from reportlab.lib import colors
 from flask_mail import Message as MailMessage,Mail
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import cm
-from datetime import datetime, date
+from datetime import datetime, date,timedelta
 from flask import jsonify, send_file
 from flask import Blueprint
 from routes import auth_bp
 import secrets
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, PageBreak, Spacer
+import json, io
 from flask_migrate import Migrate
 from werkzeug.security import generate_password_hash, check_password_hash
 from email.mime.text import MIMEText
@@ -42,6 +47,8 @@ import json
 load_dotenv()
 
 app = Flask(__name__)
+CORS(app, )
+
 CORS(app, supports_credentials=True)
 
 
@@ -138,8 +145,8 @@ os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 app.config["MAIL_SERVER"] = "smtp.gmail.com"
 app.config["MAIL_PORT"] = 587
 app.config["MAIL_USE_TLS"] = True
-app.config["MAIL_USERNAME"] = "mbarouktechcreation@gmail.com"  # tumia Gmail yako
-app.config["MAIL_PASSWORD"] = "guyh frqc xqnw krfy"  # App Password ya Gmail
+app.config["MAIL_USERNAME"] = "mkombozifurniture21@gmail.com"  # tumia Gmail yako
+app.config["MAIL_PASSWORD"] = "lpcq ekas tlch olfp"  # App Password ya Gmail
 
 mail = Mail(app)
 
@@ -279,7 +286,7 @@ Asante kwa kuwa sehemu ya wateja wetu.
             try:
                 msg = MailMessage(
                     subject=subject,
-                    sender="mbarouktechcreation@gmail.com",  # 🔁 badilisha kwa email yako
+                    sender="mkombozifurniture21@gmail.com",  # 🔁 badilisha kwa email yako
                     recipients=[sub.email],
                     body=message_body,
                 )
@@ -500,7 +507,7 @@ Asante kwa kuwa sehemu ya wateja wetu.
             try:
                 msg = MailMessage(
                     subject=subject,
-                    sender="mbarouktechcreation@gmail.com",  # badilisha kama inahitajika
+                    sender="mkombozifurniture21@gmail.com",  # badilisha kama inahitajika
                     recipients=[sub.email],
                     body=message_body,
                 )
@@ -583,76 +590,58 @@ def delete_workshop_item(id):
 
 
 # ✅ ENDPOINT: Thibitisha Oda
-@app.route("/api/orders/confirm/<int:order_id>", methods=["POST"])
+
+@app.route("/api/orders/<int:order_id>/confirm", methods=["POST"])
 def confirm_order(order_id):
     try:
-        # Pata online order pekee
-        order = db.session.get(Order, order_id)
-        if not order:
-            return jsonify({"error": "Order not found"}), 404
+        # Pata order
+        order = Order.query.get_or_404(order_id)
 
-        if order.status == "paid":
-            return jsonify({"message": "Order already confirmed"}), 400
+        # Hakikisha bado ipo pending
+        if order.status != "pending":
+            return jsonify({"error": "Order tayari imeshaprocessiwa"}), 400
 
-        # Thibitisha malipo
-        order.status = "paid"
+        # Decode order_items
+        items = json.loads(order.order_items)
 
-        # Punguza stock kulingana na source ya kila item
-        try:
-            order_items = json.loads(order.order_items or "[]")
-        except Exception:
-            return jsonify({"error": "Invalid order_items format"}), 400
-
-        print(f"Confirming Order #{order.id}, total items: {len(order_items)}")
-
-        for item in order_items:
+        # Loop kwenye kila item na update stock
+        for item in items:
             product_name = item.get("product_name")
-            quantity = int(item.get("quantity", 0))
-            item_source = item.get("source", "").lower()  # godown au workshop
+            quantity = item.get("quantity", 0)
+            source = item.get("source", "godown").lower()  # default to godown
 
-            stock_item = None
-            if item_source == "godown":
-                stock_item = GodownItem.query.filter_by(product_name=product_name).first()
-            elif item_source == "workshop":
-                stock_item = WorkshopItem.query.filter_by(product_name=product_name).first()
+            if source == "godown":
+                godown_item = GodownItem.query.filter_by(product_name=product_name).first()
+                if godown_item and godown_item.quantity >= quantity:
+                    godown_item.quantity -= quantity
+                else:
+                    return jsonify({"error": f"Hakuna stock ya kutosha ya {product_name} kwenye Godown"}), 400
 
-            if stock_item and stock_item.quantity is not None:
-                before_qty = stock_item.quantity
-                stock_item.quantity = max(stock_item.quantity - quantity, 0)
-                print(f"Reduced {quantity} of '{product_name}' from {item_source}. Stock: {before_qty} -> {stock_item.quantity}")
+            elif source == "workshop":
+                workshop_item = WorkshopItem.query.filter_by(product_name=product_name).first()
+                if workshop_item and workshop_item.quantity >= quantity:
+                    workshop_item.quantity -= quantity
+                else:
+                    return jsonify({"error": f"Hakuna stock ya kutosha ya {product_name} kwenye Workshop"}), 400
+
             else:
-                print(f"Item '{product_name}' not found in {item_source} or quantity is None")
+                return jsonify({"error": f"Source '{source}' haijulikani kwa {product_name}"}), 400
 
-        # Tuma email kwa mteja
-        try:
-            email_body = f"""
-Habari {order.customer_name},
-
-Malipo yako kwa oda #{order.id} yamepokelewa kwa mafanikio.
-
-Jumla: {order.total_price:,} TZS
-
-Asante kwa kununua kwetu!
-
----
-Timu ya Duka
-"""
-            send_email(
-                to=order.customer_address,
-                subject=f"Uthibitisho wa Malipo ya Oda #{order.id}",
-                body=email_body,
-            )
-        except Exception as e:
-            print("Email sending error:", str(e))
-
+        # Update order status na timestamp
+        order.status = "confirmed"
+        order.confirmed_at = datetime.utcnow()  # optional, timestamp ya confirmation
         db.session.commit()
-        print(f"Order #{order.id} confirmed successfully!")
-        return jsonify({"message": "Online order confirmed and email sent", "status": "paid"}), 200
+
+        return jsonify({
+            "message": "Order confirmed, stock updated",
+            "order_id": order.id,
+            "status": order.status
+        }), 200
 
     except Exception as e:
         db.session.rollback()
-        print("Confirm order failed:", str(e))
         return jsonify({"error": str(e)}), 500
+
 
 
 
@@ -666,7 +655,7 @@ def create_order():
         required_fields = [
             "customer_name",
             "customer_phone",
-            "customer_address",  # Email
+            "customer_address",
             "location",
             "delivery_option",
             "order_items",
@@ -676,13 +665,33 @@ def create_order():
             if field not in data or str(data[field]).strip() == "":
                 return jsonify({"error": f"Field '{field}' is required"}), 400
 
-        # Hakikisha email inaishia na @gmail.com
+        # Hakikisha email ni @gmail.com
         if not str(data["customer_address"]).lower().endswith("@gmail.com"):
             return jsonify({"error": "Email lazima iishie na @gmail.com"}), 400
 
-        # Hakikisha order_items iko kama list
+        # Hakikisha order_items ni list
         if not isinstance(data["order_items"], list):
             return jsonify({"error": "order_items must be a list"}), 400
+
+        # Jaza source na product_type kwa kila item
+        items_with_source = []
+        for item in data["order_items"]:
+            product_name = item.get("product_name")
+
+            godown_item = GodownItem.query.filter_by(product_name=product_name).first()
+            workshop_item = WorkshopItem.query.filter_by(product_name=product_name).first()
+
+            if godown_item:
+                item["source"] = "godown"
+                item["product_type"] = godown_item.product_type or "Haijatajwa"
+            elif workshop_item:
+                item["source"] = "workshop"
+                item["product_type"] = workshop_item.product_type or "Haijatajwa"
+            else:
+                item["source"] = "unknown"
+                item["product_type"] = "Haijatajwa"
+
+            items_with_source.append(item)
 
         # Unda order mpya
         order = Order(
@@ -691,50 +700,53 @@ def create_order():
             customer_address=data["customer_address"].strip(),
             location=data["location"].strip(),
             delivery_option=str(data.get("delivery_option", "No")).strip(),
-            order_items=json.dumps(data.get("order_items", [])),
+            order_items=json.dumps(items_with_source),
             total_price=float(data.get("total_price", 0)),
-            status="pending",  # default status
-            date_ordered=datetime.utcnow(),  # default timestamp
+            status="pending",
+            date_ordered=datetime.utcnow(),
         )
         db.session.add(order)
         db.session.commit()
 
-        # Optional: email sending
-        try:
-            items_desc = "\n".join(
-                [
-                    f"{item['product_name']} x {item['quantity']} = TZS {item['price'] * item['quantity']:,}"
-                    for item in data["order_items"]
-                ]
-            )
+        # Function ya kutuma email (background)
+        def send_email_async(order_data):
+            try:
+                items_desc = "\n".join(
+                    [
+                        f"{item['product_name']} x {item['quantity']} = TZS {item['price'] * item['quantity']:,}"
+                        for item in order_data["order_items"]
+                    ]
+                )
+                subject = "Oda Yako Imepokelewa - Asante kwa kununua!"
+                body = (
+                    f"Habari {order_data['customer_name']},\n\n"
+                    f"Oda yako imepokelewa!\n\n"
+                    f"Mahali pa kufikisha: {order_data['location']}\n"
+                    f"Chaguo la delivery: {order_data['delivery_option']}\n\n"
+                    f"Bidhaa:\n{items_desc}\n\n"
+                    f"Jumla ya malipo: TZS {order_data['total_price']:,}\n"
+                    f"Malipo yafanyike kwa namba: 0764 262 210\n\n"
+                    f"Asante, Karibu Sana Mkombozi Furniture"
+                )
 
-            subject = "Oda Yako Imepokelewa - Asante kwa kununua!"
-            body = (
-                f"Habari {data['customer_name']},\n\n"
-                f"Oda yako imepokelewa!\n\n"
-                f"Mahali pa kufikisha: {data['location']}\n"
-                f"Chaguo la delivery: {data['delivery_option']}\n\n"
-                f"Bidhaa:\n{items_desc}\n\n"
-                f"Jumla ya malipo: TZS {data['total_price']:,}\n"
-                f"Malipo yafanyike kwa namba: 0712345678\n\n"
-                f"Asante, Karibu Sana Mkombozi Furniture"
-            )
+                sender_email = "mkombozifurniture21@gmail.com"
+                sender_password = "lpcq ekas tlch olfp"
+                receiver_email = order_data["customer_address"]
 
-            sender_email = "mbarouktechcreation@gmail.com"
-            sender_password = "guyh frqc xqnw krfy"
-            receiver_email = data["customer_address"]
+                msg = MIMEMultipart()
+                msg["From"] = sender_email
+                msg["To"] = receiver_email
+                msg["Subject"] = subject
+                msg.attach(MIMEText(body, "plain"))
 
-            msg = MIMEMultipart()
-            msg["From"] = sender_email
-            msg["To"] = receiver_email
-            msg["Subject"] = subject
-            msg.attach(MIMEText(body, "plain"))
+                with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+                    server.login(sender_email, sender_password)
+                    server.sendmail(sender_email, receiver_email, msg.as_string())
+            except Exception as e:
+                print("Email sending failed (ignored for frontend):", str(e))
 
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-                server.login(sender_email, sender_password)
-                server.sendmail(sender_email, receiver_email, msg.as_string())
-        except Exception as e:
-            print("Email sending failed:", str(e))
+        # Start email thread
+        Thread(target=send_email_async, args=(data,)).start()
 
         return jsonify({
             "message": "Order received successfully",
@@ -746,16 +758,44 @@ def create_order():
         return jsonify({"error": str(e)}), 500
 
 
+
 @app.route("/api/orders", methods=["GET"])
 def get_orders():
     try:
         online_orders = Order.query.all()
-
-
         result = []
 
-        # Online Orders
         for order in online_orders:
+            items = json.loads(order.order_items or "[]")
+
+            for item in items:
+                # Hakikisha source ipo
+                if "source" not in item or not item["source"]:
+                    godown_item = GodownItem.query.filter_by(product_name=item["product_name"]).first()
+                    workshop_item = WorkshopItem.query.filter_by(product_name=item["product_name"]).first()
+
+                    if godown_item:
+                        item["source"] = "godown"
+                        item["product_type"] = godown_item.product_type or "Haijatajwa"
+                    elif workshop_item:
+                        item["source"] = "workshop"
+                        item["product_type"] = workshop_item.product_type or "Haijatajwa"
+                    else:
+                        item["source"] = "unknown"
+                        item["product_type"] = item.get("product_type") or "Haijatajwa"
+                else:
+                    # Hakikisha product_type ipo hata kama source ipo
+                    if "product_type" not in item or not item["product_type"]:
+                        godown_item = GodownItem.query.filter_by(product_name=item["product_name"]).first()
+                        workshop_item = WorkshopItem.query.filter_by(product_name=item["product_name"]).first()
+
+                        if godown_item:
+                            item["product_type"] = godown_item.product_type or "Haijatajwa"
+                        elif workshop_item:
+                            item["product_type"] = workshop_item.product_type or "Haijatajwa"
+                        else:
+                            item["product_type"] = "Haijatajwa"
+
             result.append({
                 "id": order.id,
                 "customer_name": order.customer_name,
@@ -763,7 +803,7 @@ def get_orders():
                 "customer_address": order.customer_address or "",
                 "location": order.location or "Haijatajwa",
                 "delivery_option": order.delivery_option.strip().capitalize() if order.delivery_option else "No",
-                "order_items": json.loads(order.order_items or "[]"),
+                "order_items": items,
                 "total_price": order.total_price,
                 "status": order.status or "pending",
                 "date_ordered": (order.date_ordered.strftime("%Y-%m-%d %H:%M") 
@@ -928,169 +968,99 @@ def increment_video_views(video_id):
     return jsonify({"message": "View counted"})
 
 
-#   Generate daily report
-@app.route("/api/reports/daily/export-pdf", methods=["GET"])
-def export_daily_report_pdf():
-    from reportlab.lib.pagesizes import A4
-    from reportlab.pdfgen import canvas
-    from reportlab.lib.units import cm
-    from reportlab.lib import colors
-    import io
 
-    today = request.args.get("date")
-    if today:
-        try:
-            today = datetime.strptime(today, "%Y-%m-%d").date()
-        except:
-            return jsonify({"error": "Tarehe si sahihi, tumia YYYY-MM-DD"}), 400
-    else:
-        today = date.today()
 
-    orders_today = Order.query.filter(func.date(Order.date_ordered) == today).all()
 
-    # --- Pata Bidhaa zilizonunuliwa --- 
-    workshop_items = {}
-    godown_items_purchased = {}
+@app.route("/api/reports/stock-summary", methods=["GET"])
+def stock_summary():
+    try:
+        # --- STOCK ZILIZOBAKI ---
+        godown_stock = [
+            {
+                "product_name": item.product_name,
+                "product_type": getattr(item, "product_type", ""),  # ✅ ongeza product type
+                "quantity": item.quantity,
+                "unit_price": item.unit_price,
+                "total_value": item.quantity * item.unit_price
+            }
+            for item in GodownItem.query.all()
+        ]
+        workshop_stock = [
+            {
+                "product_name": item.product_name,
+                "product_type": getattr(item, "product_type", ""),  # ✅ ongeza product type
+                "quantity": item.quantity,
+                "unit_price": item.unit_price,
+                "total_value": item.quantity * item.unit_price
+            }
+            for item in WorkshopItem.query.all()
+        ]
 
-    for order in orders_today:
-        try:
+        # --- ZILIZOISHA ---
+        out_of_stock = {
+            "godown": [i.product_name for i in GodownItem.query.filter(GodownItem.quantity <= 0).all()],
+            "workshop": [i.product_name for i in WorkshopItem.query.filter(WorkshopItem.quantity <= 0).all()],
+        }
+
+        # --- MAUZO (CONFIRMED ORDERS) ---
+        sold_items = {"godown": {}, "workshop": {}}
+
+        confirmed_orders = Order.query.filter_by(status="confirmed").all()
+        for order in confirmed_orders:
             items = json.loads(order.order_items)
             for item in items:
-                name = item.get("product_name", "Haijulikani")
+                name = item.get("product_name")
                 qty = item.get("quantity", 0)
-                price = item.get("unit_price", None)
-                source = item.get("source", "").strip().lower()  # workshop or godown
-                product_type = item.get("product_type", "-")
+                src = item.get("source", "godown").lower()
+                price = item.get("price", 0)
+                ptype = item.get("product_type", "")
 
-                if price is None or price == 0:
-                    godown_item = GodownItem.query.filter_by(product_name=name).first()
-                    price = godown_item.unit_price if godown_item else 0.0
-                price = float(price)
-                subtotal = qty * price
-
-                target_dict = workshop_items if source == "workshop" else godown_items_purchased
-
-                if name not in target_dict:
-                    target_dict[name] = {
-                        "quantity": qty,
+                if name not in sold_items[src]:
+                    sold_items[src][name] = {
+                        "quantity": 0,
+                        "revenue": 0,
                         "unit_price": price,
-                        "subtotal": subtotal,
-                        "product_type": product_type,
+                        "product_type": ptype
                     }
-                else:
-                    target_dict[name]["quantity"] += qty
-                    target_dict[name]["subtotal"] += subtotal
-        except Exception as e:
-            print("Error parsing order_items:", e)
-            continue
+                sold_items[src][name]["quantity"] += qty
+                sold_items[src][name]["revenue"] += qty * price
 
-    # --- Stock ---
-    godown_stock_items = GodownItem.query.all()
-    in_stock = []
-    out_of_stock = []
-    for item in godown_stock_items:
-        entry = {
-            "product_name": item.product_name,
-            "product_type": item.product_type,
-            "quantity": item.quantity,
-            "status": "Imeisha" if item.quantity == 0 else "Inapatikana",
-        }
-        if item.quantity > 0:
-            in_stock.append(entry)
-        else:
-            out_of_stock.append(entry)
+        # --- MAUZO (MANUAL ORDERS ZILIZOLIPWA) ---
+        paid_manual = ManualOrder.query.filter_by(status="paid").all()
+        for order in paid_manual:
+            try:
+                items = json.loads(order.items)
+            except:
+                items = []
+            for item in items:
+                name = item.get("product_name")
+                qty = item.get("quantity", 0)
+                src = item.get("source", "godown").lower()
+                price = item.get("price", 0)
+                ptype = item.get("product_type", "")
 
-    # --- PDF ---
-    buffer = io.BytesIO()
-    pdf = canvas.Canvas(buffer, pagesize=A4)
-    width, height = A4
+                if name not in sold_items[src]:
+                    sold_items[src][name] = {
+                        "quantity": 0,
+                        "revenue": 0,
+                        "unit_price": price,
+                        "product_type": ptype
+                    }
+                sold_items[src][name]["quantity"] += qty
+                sold_items[src][name]["revenue"] += qty * price
 
-    # Header
-    pdf.setFont("Helvetica-Bold", 16)
-    pdf.drawString(2*cm, height-2*cm, "📊 Ripoti ya Mauzo ya Siku")
-    pdf.setFont("Helvetica", 12)
-    pdf.drawString(2*cm, height-3*cm, f"Tarehe: {today.strftime('%d/%m/%Y')}")
+        # --- RESPONSE ---
+        return jsonify({
+            "stock_remaining": {
+                "godown": godown_stock,
+                "workshop": workshop_stock
+            },
+            "out_of_stock": out_of_stock,
+            "sold_items": sold_items
+        }), 200
 
-    y = height - 4*cm
-
-    # Function to draw table
-    def draw_table(items_dict, title, y_start):
-        pdf.setFont("Helvetica-Bold", 12)
-        pdf.setFillColor(colors.lightgrey)
-        pdf.rect(1.5*cm, y_start-0.3*cm, width-3*cm, 0.8*cm, fill=1)
-        pdf.setFillColor(colors.black)
-        pdf.drawString(2*cm, y_start, title)
-        pdf.drawString(7*cm, y_start, "Aina")
-        pdf.drawString(10*cm, y_start, "Idadi")
-        pdf.drawString(13*cm, y_start, "Bei/Unit")
-        pdf.drawString(16*cm, y_start, "Jumla")
-        y_curr = y_start - 1*cm
-        pdf.setFont("Helvetica", 11)
-        total = 0
-        for name, data in items_dict.items():
-            if y_curr < 3*cm:
-                pdf.showPage()
-                y_curr = height - 2*cm
-            pdf.drawString(2*cm, y_curr, name)
-            pdf.drawString(7*cm, y_curr, data["product_type"])
-            pdf.drawString(10*cm, y_curr, str(data["quantity"]))
-            pdf.drawString(13*cm, y_curr, f"{data['unit_price']:.2f}")
-            pdf.drawString(16*cm, y_curr, f"{data['subtotal']:.2f}")
-            total += data["subtotal"]
-            y_curr -= 0.8*cm
-        # Total
-        y_curr -= 0.5*cm
-        pdf.setFont("Helvetica-Bold", 12)
-        pdf.drawString(12*cm, y_curr, "Jumla Kuu:")
-        pdf.drawString(16*cm, y_curr, f"{total:.2f}")
-        return y_curr - 1*cm
-
-    # Draw Workshop Purchases
-    y = draw_table(workshop_items, "🛠 Bidhaa Zilizopatikana Workshop", y)
-
-    # Draw Godown Purchases
-    y = draw_table(godown_items_purchased, "🏭 Bidhaa Zilizopatikana Godown", y)
-
-    # Stock
-    pdf.setFont("Helvetica-Bold", 12)
-    pdf.drawString(2*cm, y, "📦 Bidhaa Zilizopo Stoo")
-    y -= 0.8*cm
-    pdf.setFont("Helvetica", 11)
-    for item in in_stock:
-        if y < 3*cm:
-            pdf.showPage()
-            y = height - 2*cm
-        pdf.drawString(2*cm, y, f"{item['product_name']} ({item['product_type']}) - {item['quantity']} pcs")
-        y -= 0.6*cm
-
-    y -= 0.5*cm
-    pdf.setFont("Helvetica-Bold", 12)
-    pdf.drawString(2*cm, y, "❌ Bidhaa Zilizomalizika")
-    y -= 0.8*cm
-    pdf.setFont("Helvetica", 11)
-    for item in out_of_stock:
-        if y < 3*cm:
-            pdf.showPage()
-            y = height - 2*cm
-        pdf.drawString(2*cm, y, f"{item['product_name']} ({item['product_type']}) - Imeisha")
-        y -= 0.6*cm
-
-    # Signatures and Stamp
-    y -= 2*cm
-    pdf.setFont("Helvetica-Bold", 12)
-    pdf.drawString(2*cm, y, "Saini Msimamizi: ____________________")
-    y -= 1.5*cm
-    pdf.setFillColor(colors.lightgrey)
-    pdf.rect(2*cm, y, 4*cm, 2*cm, fill=1)
-    pdf.setFillColor(colors.black)
-    pdf.drawString(2.2*cm, y+1*cm, "Muhuri wa Ofisi")
-
-    pdf.save()
-    buffer.seek(0)
-    filename = f"daily_report_{today.isoformat()}.pdf"
-    return send_file(buffer, mimetype="application/pdf", as_attachment=True, download_name=filename)
-
-# Kutuma ujumbe
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/contact", methods=["POST"])
@@ -1260,11 +1230,10 @@ def create_manual_order():
         data = request.get_json()
         print("Data received:", data)
 
-        # Sanitize fields if needed
+        # Sanitize fields
         customer_name = data.get("customer_name", "").strip()
         phone = data.get("phone", "").strip()
         email = data.get("email", "").strip()
-        location = data.get("location", "").strip()
         items = data.get("items", [])
         payment_method = data.get("payment_method", "cash").strip()
         total_price = data.get("total_price", 0.0)
@@ -1275,11 +1244,11 @@ def create_manual_order():
         # Convert items to JSON string for storage
         items_json = json.dumps(items, ensure_ascii=False)
 
+        # Create new manual order
         new_order = ManualOrder(
             customer_name=customer_name,
             phone=phone,
             email=email,
-            location=location,
             items=items_json,
             payment_method=payment_method,
             total_price=total_price,
@@ -1288,9 +1257,28 @@ def create_manual_order():
             delivery_option=delivery_option,
             delivery_location=delivery_location
         )
-
         db.session.add(new_order)
-        db.session.commit()
+        db.session.flush()  # Flush to get new_order.id if needed
+
+        # --- Downstock logic based on source ---
+        for item in items:
+            product_name = item.get("product_name")
+            quantity = item.get("quantity", 0)
+            source = item.get("source")
+
+            if source == "godown":
+                product = GodownItem.query.filter_by(product_name=product_name).first()
+            elif source == "workshop":
+                product = WorkshopItem.query.filter_by(product_name=product_name).first()
+            else:
+                continue
+
+            if product:
+                # Deduct quantity but avoid negative stock
+                product.quantity = max(product.quantity - quantity, 0)
+                db.session.add(product)
+
+        db.session.commit()  # Commit order + stock updates
 
         return jsonify({
             "message": "Manual order created successfully.",
@@ -1298,9 +1286,9 @@ def create_manual_order():
         }), 201
 
     except Exception:
-        # Print full traceback to console
         traceback.print_exc()
         return jsonify({"error": "Failed to create manual order"}), 500
+
 
 
 # --------------------------
@@ -1317,12 +1305,18 @@ def get_manual_orders():
         except:
             items = []
 
+        # Ensure each item has 'source' and 'product_type'
+        for item in items:
+            if "source" not in item:
+                item["source"] = "unknown"
+            if "product_type" not in item or not item["product_type"]:
+                item["product_type"] = "Haijatajwa"
+
         order_list.append({
             "id": order.id,
             "customer_name": order.customer_name,
             "phone": order.phone,
             "email": order.email,
-            "location": order.location,
             "delivery_option": order.delivery_option,
             "delivery_location": order.delivery_location,
             "items": items,
@@ -1334,6 +1328,7 @@ def get_manual_orders():
         })
 
     return jsonify(order_list), 200
+
 
 
 
