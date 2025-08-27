@@ -903,7 +903,7 @@ def get_latest_video_db():
 
 
 # Upload video and save to DB & filesystem
-@app.route("/upload-video", methods=["POST"])
+@app.route("/api/upload-video", methods=["POST"])
 def upload_video():
     video = request.files.get("video")
     title = request.form.get("title", "Untitled")
