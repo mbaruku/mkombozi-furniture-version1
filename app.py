@@ -56,6 +56,8 @@ CORS(app, supports_credentials=True)
 app.config["SECRET_KEY"] = os.getenv("SECRET_KEY")
 app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("DATABASE_URL")
 
+# app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///furniture.db"
+
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
 
@@ -835,6 +837,39 @@ def update_delivery_fee(order_id):
 
 
 
+# update-item-price-orders
+
+@app.route("/api/orders/<int:order_id>/update-item-price-orders", methods=["PUT"])
+def update_item_price_orders(order_id):
+    data = request.json
+    item_index = data.get("item_index")
+    price = data.get("price")
+
+    if price is None or item_index is None:
+        return jsonify({"status": "error", "message": "Missing item_index or price"}), 400
+
+    order = Order.query.get_or_404(order_id)
+
+    try:
+        # Decode items JSON
+        items = order.order_items or []
+        if isinstance(items, str):
+            items = json.loads(items)
+
+        if 0 <= item_index < len(items):
+            items[item_index]["price"] = price
+            order.order_items = json.dumps(items)  # Save back as string
+            db.session.commit()
+            return jsonify({"status": "success", "items": items})
+        else:
+            return jsonify({"status": "error", "message": "Invalid item index"}), 400
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+
+
 
 @app.route("/api/products", methods=["GET"])
 def get_filtered_products():
@@ -1383,6 +1418,41 @@ def update_manual_order_delivery(order_id):
     order.delivery_fee = fee
     db.session.commit()
     return jsonify({"message": "Delivery fee updated", "delivery_fee": fee})
+
+
+
+
+
+
+@app.route("/api/manual-orders/<int:order_id>/update-item-price", methods=["PUT"])
+def update_item_price(order_id):
+    data = request.json
+    item_index = data.get("item_index")
+    price = data.get("price")
+
+    if price is None or item_index is None:
+        return jsonify({"status": "error", "message": "Missing item_index or price"}), 400
+
+    order = ManualOrder.query.get_or_404(order_id)
+
+    try:
+        # Decode items string into Python list
+        items = json.loads(order.items)
+
+        if 0 <= item_index < len(items):
+            items[item_index]["price"] = price
+            # Encode back to JSON string
+            order.items = json.dumps(items)
+            db.session.commit()
+            return jsonify({"status": "success"})
+        else:
+            return jsonify({"status": "error", "message": "Invalid item index"}), 400
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+
    
 
 
